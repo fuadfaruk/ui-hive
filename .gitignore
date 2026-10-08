@@ -4,4 +4,6 @@ test-results/
 playwright-report/
 coverage/
 *.log
+logs/
 .env*
+.kilo/

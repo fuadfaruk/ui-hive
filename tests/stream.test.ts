@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readSse, readUtf8, StreamError, extractHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
+import { readSse, readUtf8, StreamError, extractHtml, extractJson, isCompleteHtml, isHtmlDocument, salvageHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
 import type { VariationRecord } from '../shared/stream.js';
 
 const encoder = new TextEncoder();
@@ -147,6 +147,41 @@ describe('html extraction', () => {
     const html = '<!doctype html><html><body>x</body></html>';
     expect(extractHtml(html)).toBe(html);
     expect(extractHtml('<div>no wrapper</div>')).toBe('<div>no wrapper</div>');
+  });
+});
+
+describe('json extraction and html salvage', () => {
+  it('recovers the first top-level JSON span from surrounding prose or a fence', () => {
+    expect(extractJson('Sure! ["A","B"] hope that helps')).toBe('["A","B"]');
+    expect(extractJson('```json\n{"name":"x","html":"<p>}</p>"}\n```')).toBe('{"name":"x","html":"<p>}</p>"}');
+    expect(extractJson('{"a":{"b":"}"},"c":[1,2]} trailing')).toBe('{"a":{"b":"}"},"c":[1,2]}');
+    expect(extractJson('no json here')).toBeUndefined();
+    expect(extractJson('["unterminated"')).toBeUndefined();
+  });
+
+  it('distinguishes a complete document from a started one', () => {
+    expect(isCompleteHtml('<!doctype html><html><body>x</body></html>')).toBe(true);
+    expect(isCompleteHtml('<html><body>x')).toBe(false);
+    expect(isCompleteHtml('<div>fragment</div>')).toBe(false);
+    expect(isHtmlDocument('<html lang="en">')).toBe(true);
+    expect(isHtmlDocument('<div>fragment</div>')).toBe(false);
+  });
+
+  it('salvages a truncated document without inventing content before the first tag', () => {
+    expect(salvageHtml('```html\n<!DOCTYPE html><html><body><p>cut')).toBe('<!DOCTYPE html><html><body><p>cut</body></html>');
+    const prose = salvageHtml('Here you go:\n<!doctype html><html><body>x');
+    expect(prose?.startsWith('<!doctype html>')).toBe(true);
+    expect(prose).not.toContain('Here you go');
+  });
+
+  it('closes an unterminated trailing style or script block', () => {
+    expect(salvageHtml('<!DOCTYPE html><html><head><style>.x{color:red}')).toBe('<!DOCTYPE html><html><head><style>.x{color:red}</style></body></html>');
+    expect(salvageHtml('<html><body><script>const x = 1;')).toBe('<html><body><script>const x = 1;</script></body></html>');
+  });
+
+  it('appends only the missing closing tags and rejects output without a document tag', () => {
+    expect(salvageHtml('<!doctype html><html><body>x</body>')).toBe('<!doctype html><html><body>x</body></html>');
+    expect(salvageHtml('just prose')).toBeUndefined();
   });
 });
 

@@ -183,7 +183,7 @@ export function useGeneration(token: string | null, enabled: boolean) {
             patchArtifact(op, event.artifactId, { status: 'error', error: 'The provider returned an empty design.' });
           } else {
             storeHtml(op, event.artifactId, html);
-            patchArtifact(op, event.artifactId, { html, status: 'complete', error: undefined });
+            patchArtifact(op, event.artifactId, { html, status: event.status ?? 'complete', error: undefined });
           }
           op.finished.add(event.artifactId);
         } else {

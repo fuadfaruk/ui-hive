@@ -1,14 +1,32 @@
 import { resolveRequestUrl } from '../shared/connection.js';
 import { log, registerSecret } from '../shared/diagnostics.js';
 import { readSse, readUtf8, StreamError } from '../shared/stream.js';
-import { LIMITS } from '../shared/types.js';
+import { LIMITS, type Protocol } from '../shared/types.js';
 import type { SavedConnection } from './connection.js';
+
+/**
+ * Provider-level observation of one paid request: what the protocol said when it
+ * ended and how much it produced. It is reported through `CompletionRequest.summary`
+ * so a truncated-but-labeled-complete stream is provable after the fact.
+ */
+export interface CompletionSummary {
+  protocol: Protocol;
+  streaming: boolean;
+  endReason: 'finish_reason' | 'done' | 'message_stop' | 'eof' | 'error';
+  finishReason?: string;
+  reasoning: boolean;
+  deltas: number;
+  outputChars: number;
+}
 
 export interface CompletionRequest {
   system: string;
   user: string;
   signal: AbortSignal;
   maxTokens?: number;
+  temperature?: number;
+  /** Receives a structural summary of the request's stream/response. Never throws into the pipeline. */
+  summary?: (info: CompletionSummary) => void;
   /** Development-only hook that receives the raw request body and provider output. */
   trace?: ProviderTrace;
 }
@@ -30,6 +48,16 @@ function traceSafe(trace: ProviderTrace | undefined, entry: ProviderTraceEntry):
   if (!trace) return;
   try {
     trace(entry);
+  } catch {
+    // Ignored on purpose.
+  }
+}
+
+/** Summary reporting is diagnostic only: a fault in the sink must never fail a paid request. */
+function summarySafe(summary: CompletionRequest['summary'], info: CompletionSummary): void {
+  if (!summary) return;
+  try {
+    summary(info);
   } catch {
     // Ignored on purpose.
   }
@@ -89,6 +117,19 @@ function parseJson(text: string): Record<string, unknown> {
   return result;
 }
 
+// Extract the protocol's finish reason without validating or throwing, so it can be
+// captured for the summary even when the same packet later fails validation.
+function finishReasonOf(packet: Record<string, unknown>, protocol: Protocol): string | undefined {
+  if (protocol === 'openai') {
+    if (!Array.isArray(packet.choices) || packet.choices.length === 0) return undefined;
+    const choice = packet.choices[0];
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice)) return undefined;
+    const reason = (choice as Record<string, unknown>).finish_reason;
+    return typeof reason === 'string' ? reason : undefined;
+  }
+  return typeof packet.stop_reason === 'string' ? packet.stop_reason : undefined;
+}
+
 function checkFinish(reason: unknown, protocol: 'openai' | 'anthropic'): void {
   if ((protocol === 'openai' && reason === 'stop') ||
     (protocol === 'anthropic' && (reason === 'end_turn' || reason === 'stop_sequence'))) return;
@@ -137,6 +178,14 @@ function completionText(value: Record<string, unknown>, protocol: 'openai' | 'an
 
 type SseEvent = { event?: string; data: string };
 
+// Mutable state the protocol reducers fill in so `stream()` can report a summary even
+// when the reducer throws (the outer `finally` reads it in both cases).
+interface StreamSummaryState {
+  finishReason?: string;
+  reasoning: boolean;
+  endReason: CompletionSummary['endReason'];
+}
+
 // Coalesce raw upstream frames so one provider response does not double the SSE
 // stream frame-for-frame. Each flush is well under the per-event SSE limit.
 const TRACE_FLUSH_CHARS = 8 * 1024;
@@ -161,14 +210,13 @@ async function* traceFrames(events: AsyncIterable<SseEvent>, trace: ProviderTrac
   }
 }
 
-async function* openAiStream(events: AsyncIterable<SseEvent>): AsyncGenerator<string> {
+async function* openAiStream(events: AsyncIterable<SseEvent>, state: StreamSummaryState): AsyncGenerator<string> {
   let finished = false;
-  let reasoned = false;
   let received = false;
   for await (const event of events) {
     if (event.event === 'error') {
-      log.server('warn', 'provider', 'openai: named error event', { event: event.event, reasoned });
-      if (reasoned) throw reasoningOnly();
+      log.server('warn', 'provider', 'openai: named error event', { event: event.event, reasoned: state.reasoning });
+      if (state.reasoning) throw reasoningOnly();
       throw providerFailure();
     }
     if (!event.data.trim() || event.event === 'ping' || event.event === 'keepalive') continue;
@@ -179,21 +227,23 @@ async function* openAiStream(events: AsyncIterable<SseEvent>): AsyncGenerator<st
         // content is complete and the missing reason is a provider quirk, not a
         // truncation. Only a content-free stream is a genuine failure.
         if (received) {
-          log.server('warn', 'provider', 'openai: [DONE] before any finish_reason; accepting streamed content', { reasoned });
+          log.server('warn', 'provider', 'openai: [DONE] before any finish_reason; accepting streamed content', { reasoned: state.reasoning });
+          state.endReason = 'done';
           return;
         }
-        log.server('warn', 'provider', 'openai: [DONE] before any finish_reason', { reasoned });
-        if (reasoned) throw reasoningOnly();
+        log.server('warn', 'provider', 'openai: [DONE] before any finish_reason', { reasoned: state.reasoning });
+        if (state.reasoning) throw reasoningOnly();
         throw new ProviderError('incomplete', 'The provider ended the stream without a successful finish reason.');
       }
       log.server('debug', 'provider', 'openai: [DONE] received');
+      state.endReason = 'done';
       return;
     }
     let packet: Record<string, unknown>;
     try {
       packet = parseJson(event.data);
     } catch (error) {
-      if (reasoned && error instanceof ProviderError && error.status === 'error') {
+      if (state.reasoning && error instanceof ProviderError && error.status === 'error') {
         log.server('warn', 'provider', 'openai: provider error after reasoning but before content');
         throw reasoningOnly();
       }
@@ -214,7 +264,7 @@ async function* openAiStream(events: AsyncIterable<SseEvent>): AsyncGenerator<st
     if (choice.index != null && choice.index !== 0) throw unsupported();
     const delta = object(choice.delta);
     if (delta.role != null && delta.role !== 'assistant') throw unsupported();
-    if (delta.reasoning_content != null || delta.reasoning != null) reasoned = true;
+    if (delta.reasoning_content != null || delta.reasoning != null) state.reasoning = true;
     const text = openAiText(delta);
     if (finished && (text || choice.finish_reason != null)) {
       log.server('warn', 'provider', 'openai: data after finish_reason', { hasText: !!text });
@@ -227,15 +277,16 @@ async function* openAiStream(events: AsyncIterable<SseEvent>): AsyncGenerator<st
     if (choice.finish_reason != null) {
       log.server('info', 'provider', 'openai: finish_reason', { reason: choice.finish_reason });
       checkFinish(choice.finish_reason, 'openai');
+      if (typeof choice.finish_reason === 'string') state.finishReason = choice.finish_reason;
       finished = true;
     }
   }
-  log.server('warn', 'provider', 'openai: stream ended without [DONE]', { finished, reasoned });
-  if (reasoned) throw reasoningOnly();
+  log.server('warn', 'provider', 'openai: stream ended without [DONE]', { finished, reasoned: state.reasoning });
+  if (state.reasoning) throw reasoningOnly();
   throw new ProviderError('incomplete', 'The provider disconnected before the [DONE] marker.');
 }
 
-async function* anthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator<string> {
+async function* anthropicStream(events: AsyncIterable<SseEvent>, state: StreamSummaryState): AsyncGenerator<string> {
   let started = false;
   let finished = false;
   const active = new Map<number, string>();
@@ -271,6 +322,9 @@ async function* anthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator
       started = true;
       log.server('debug', 'provider', 'anthropic: message_start', { blocks: message.content.length });
       for (const block of message.content) {
+        if (block && typeof block === 'object' && ['thinking', 'redacted_thinking'].includes((block as Record<string, unknown>).type as string)) {
+          state.reasoning = true;
+        }
         const text = anthropicText(block);
         if (text) yield text;
       }
@@ -286,6 +340,7 @@ async function* anthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator
         throw new ProviderError('incomplete', 'The provider stopped before all text blocks finished successfully.');
       }
       log.server('debug', 'provider', 'anthropic: message_stop received');
+      state.endReason = 'message_stop';
       return;
     }
     if (type === 'message_delta') {
@@ -293,6 +348,7 @@ async function* anthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator
       if (delta.stop_reason != null) {
         log.server('info', 'provider', 'anthropic: stop_reason', { reason: delta.stop_reason, openBlocks: active.size });
         checkFinish(delta.stop_reason, 'anthropic');
+        if (typeof delta.stop_reason === 'string') state.finishReason = delta.stop_reason;
         if (finished || active.size) throw malformed();
         finished = true;
       }
@@ -306,6 +362,7 @@ async function* anthropicStream(events: AsyncIterable<SseEvent>): AsyncGenerator
       if (seen.has(blockIndex) || seen.size >= 1024) throw malformed();
       const block = object(packet.content_block);
       const text = anthropicText(block);
+      if (block.type === 'thinking' || block.type === 'redacted_thinking') state.reasoning = true;
       seen.add(blockIndex);
       active.set(blockIndex, block.type as string);
       if (text) yield text;
@@ -420,7 +477,11 @@ export function createProvider(
     if (request.maxTokens !== undefined && (!Number.isSafeInteger(request.maxTokens) || request.maxTokens < 1)) {
       throw new ProviderError('error', 'The request token limit is invalid.');
     }
+    if (request.temperature !== undefined && (!Number.isFinite(request.temperature) || request.temperature < 0 || request.temperature > 2)) {
+      throw new ProviderError('error', 'The request temperature is invalid.');
+    }
     const body: Record<string, unknown> = { model: settings.model, stream: streaming };
+    if (request.temperature !== undefined) body.temperature = request.temperature;
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       accept: streaming ? 'text/event-stream' : 'application/json',
@@ -428,9 +489,12 @@ export function createProvider(
     if (settings.protocol === 'openai') {
       headers.authorization = `Bearer ${key}`;
       body.messages = [{ role: 'system', content: request.system }, { role: 'user', content: request.user }];
-      if (settings.openaiTokenLimit) {
-        body[settings.openaiTokenLimit.field] = Math.min(settings.openaiTokenLimit.value, request.maxTokens ?? settings.openaiTokenLimit.value);
-      }
+      // Always cap the output for OpenAI-compatible gateways. The saved connection may
+      // name the field and set a ceiling; otherwise the request's own limit is sent as
+      // `max_tokens`. A value of Infinity (neither configured) sends no field at all.
+      const field = settings.openaiTokenLimit?.field ?? 'max_tokens';
+      const cap = Math.min(settings.openaiTokenLimit?.value ?? Infinity, request.maxTokens ?? Infinity);
+      if (Number.isSafeInteger(cap) && cap > 0) body[field] = cap;
     } else {
       headers['x-api-key'] = key;
       headers['anthropic-version'] = '2023-06-01';
@@ -449,6 +513,7 @@ export function createProvider(
       url,
       model: settings.model,
       maxTokens: request.maxTokens,
+      temperature: request.temperature,
       bodyBytes: new TextEncoder().encode(json).byteLength,
       headerTimeoutMs,
       inactivityMs,
@@ -527,6 +592,9 @@ export function createProvider(
   return {
     async complete(request) {
       let exchange: Awaited<ReturnType<typeof open>> | undefined;
+      let finishReason: string | undefined;
+      let endReason: CompletionSummary['endReason'] = 'error';
+      let outputChars = 0;
       try {
         exchange = await open(request, false);
         let json = '';
@@ -536,7 +604,9 @@ export function createProvider(
           label: `provider:${settings.protocol}:complete`,
         })) json += text;
         traceSafe(request.trace, { dir: 'out', channel: 'response', text: json });
-        const text = completionText(parseJson(json), settings.protocol);
+        const packet = parseJson(json);
+        finishReason = finishReasonOf(packet, settings.protocol);
+        const text = completionText(packet, settings.protocol);
         log.server('info', 'provider', 'completion parsed', { protocol: settings.protocol, bodyChars: json.length, textChars: text.length });
         if (!text.trim()) throw empty();
         if (text.length > LIMITS.totalOutput) throw truncated();
@@ -544,16 +614,26 @@ export function createProvider(
         const redact = redactor(key);
         const clean = redact.push(text) + redact.finish();
         if (clean.length > LIMITS.totalOutput) throw truncated();
+        endReason = 'finish_reason';
+        outputChars = clean.length;
         return clean;
       } catch (error) {
         log.server('warn', 'provider', 'completion failed', { protocol: settings.protocol, error, signalAborted: request.signal.aborted });
         throw normalized(error, request.signal, false);
       } finally {
         exchange?.close();
+        summarySafe(request.summary, {
+          protocol: settings.protocol, streaming: false, endReason, finishReason,
+          reasoning: false, deltas: 1, outputChars,
+        });
       }
     },
     async *stream(request) {
       let exchange: Awaited<ReturnType<typeof open>> | undefined;
+      let total = 0;
+      let deltas = 0;
+      let hasText = false;
+      const state: StreamSummaryState = { reasoning: false, endReason: 'error' };
       try {
         exchange = await open(request, true);
         const events = readSse(exchange.response.body!, exchange.signal, {
@@ -561,12 +641,9 @@ export function createProvider(
           label: `provider:${settings.protocol}:stream`,
         });
         const tapped = request.trace ? traceFrames(events, request.trace) : events;
-        const source = settings.protocol === 'openai' ? openAiStream(tapped) : anthropicStream(tapped);
+        const source = settings.protocol === 'openai' ? openAiStream(tapped, state) : anthropicStream(tapped, state);
         const redact = redactor(key);
-        let total = 0;
         let cleanTotal = 0;
-        let hasText = false;
-        let deltas = 0;
         for await (const text of source) {
           if (request.signal.aborted) throw cancelled();
           total += text.length;
@@ -591,6 +668,10 @@ export function createProvider(
         throw detail;
       } finally {
         exchange?.close();
+        summarySafe(request.summary, {
+          protocol: settings.protocol, streaming: true, endReason: state.endReason,
+          finishReason: state.finishReason, reasoning: state.reasoning, deltas, outputChars: total,
+        });
       }
     },
   };

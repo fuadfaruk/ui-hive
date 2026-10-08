@@ -1,11 +1,20 @@
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
+import { resolveRequestUrl } from '../shared/connection.js';
 import { log } from '../shared/diagnostics.js';
 import { ConnectionError, ConnectionService, EncryptedConnectionStore, publicConnection, type CredentialStore } from './connection.js';
 import { createSecurity, HttpError, OperationGuard } from './security.js';
 import { createProvider, ProviderError } from './providers.js';
 import { runGeneration, runIdeas, runVariations, type Emit } from './generation.js';
+import { createRunLog, type RunLog } from './runlog.js';
 import { LIMITS, type Bootstrap, type GenerationEvent, type GenerationRequest, type IdeasRequest, type Trace, type VariationsRequest } from '../shared/types.js';
+
+function logFlag(value: string | undefined): boolean | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (/^(?:1|true|yes|on)$/i.test(value)) return true;
+  if (/^(?:0|false|no|off)$/i.test(value)) return false;
+  return undefined;
+}
 
 export interface AppOptions {
   origin: string;
@@ -84,6 +93,10 @@ export function createLocalApp(options: AppOptions) {
   // The raw provider inspector is a development aid: it is off in production unless
   // UI_MAKER_TRACE is set explicitly. Traced text is still credential-redacted.
   const tracing = options.development === true || /^(?:1|true|yes|on)$/i.test(process.env.UI_MAKER_TRACE ?? '');
+  // The persisted run log sits beside the inspector: on by default in development,
+  // forced with UI_HIVE_LOGS=1/0, and always off under Vitest so tests never touch disk.
+  const inTest = process.env.VITEST !== undefined || process.env.NODE_ENV === 'test';
+  const logging = inTest ? false : (logFlag(process.env.UI_HIVE_LOGS) ?? options.development === true);
   app.disable('x-powered-by');
   app.set('trust proxy', false);
   app.use(security.headers);
@@ -145,12 +158,14 @@ export function createLocalApp(options: AppOptions) {
     kind: 'generate' | 'variations' | 'ideas',
     request: T,
     res: Response,
-    run: (client: ReturnType<typeof createProvider>, input: T, signal: AbortSignal, emit: Emit, trace?: Trace) => Promise<void>,
+    run: (client: ReturnType<typeof createProvider>, input: T, signal: AbortSignal, emit: Emit, trace?: Trace, logger?: RunLog) => Promise<void>,
   ) {
     const operationId = request.operationId;
     const started = Date.now();
     let abortReason: string | undefined;
     const operation = guard.acquire(operationId);
+    let logger: RunLog | undefined;
+    let doneStatus: Extract<GenerationEvent, { type: 'done' }>['status'] | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     let heartbeatTicks = 0;
@@ -194,7 +209,10 @@ export function createLocalApp(options: AppOptions) {
           await waitForDrain(res);
           drainMs += Date.now() - waitStarted;
         }
-        if (event.type === 'done') terminal = true;
+        if (event.type === 'done') {
+          terminal = true;
+          doneStatus = event.status;
+        }
       });
       return writes;
     };
@@ -209,6 +227,21 @@ export function createLocalApp(options: AppOptions) {
         hasKey: !!snapshot.key, anthropicMaxTokens: snapshot.settings.anthropicMaxTokens,
       });
       operation.signal.throwIfAborted();
+      if (logging) {
+        const fields = request as Partial<GenerationRequest & VariationsRequest>;
+        logger = createRunLog({ operationId, kind });
+        logger.meta({
+          protocol: snapshot.settings.protocol,
+          model: snapshot.settings.model,
+          resolvedUrl: resolveRequestUrl(snapshot.settings.protocol, snapshot.settings.apiUrl),
+          ...(fields.sessionId !== undefined ? { sessionId: fields.sessionId } : {}),
+          ...(fields.artifactId !== undefined ? { artifactId: fields.artifactId } : {}),
+          ...(fields.artifactIds !== undefined ? { artifactIds: fields.artifactIds } : {}),
+          ...(fields.prompt !== undefined ? { prompt: fields.prompt } : {}),
+          promptChars: fields.prompt?.length ?? 0,
+          startedAt: new Date(started).toISOString(),
+        });
+      }
       // Generation streams artifacts one at a time, so the deadline scales with the
       // per-stream provider budgets instead of assuming three concurrent streams.
       const streams = kind === 'generate' ? 3 : 1;
@@ -231,7 +264,7 @@ export function createLocalApp(options: AppOptions) {
         if (!res.destroyed && !res.writableEnded && res.writableLength < 64 * 1024) res.write(': keepalive\n\n');
       }, 15000);
       heartbeat.unref();
-      await run(client, request, operation.signal, emit, trace);
+      await run(client, request, operation.signal, emit, trace, logger);
       await writes;
       log.server('info', 'server', 'run resolved', { operationId, elapsedMs: Date.now() - started, terminal, eventsEmitted, deltaEvents });
       if (!terminal) {
@@ -269,6 +302,10 @@ export function createLocalApp(options: AppOptions) {
         destroyed: res.destroyed,
         writableEnded: res.writableEnded,
       });
+      if (logger) {
+        logger.finish({ status: doneStatus ?? (operation.signal.aborted ? 'cancelled' : 'error'), elapsedMs: Date.now() - started });
+        await logger.close();
+      }
       if (res.headersSent && !res.writableEnded) res.end();
     }
   }

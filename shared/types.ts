@@ -86,7 +86,7 @@ export type GenerationEvent =
   | (EventBase & { type: 'plan'; sessionId: string; names: [string, string, string] })
   | (EventBase & { type: 'trace'; entry: TraceEntry })
   | (ArtifactEvent & { type: 'artifact-delta'; delta: string })
-  | (ArtifactEvent & { type: 'artifact-done'; html: string })
+  | (ArtifactEvent & { type: 'artifact-done'; html: string; status?: 'complete' | 'incomplete' })
   | (ArtifactEvent & {
       type: 'artifact-error';
       status: 'error' | 'incomplete' | 'cancelled';

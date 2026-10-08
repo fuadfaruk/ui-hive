@@ -192,6 +192,62 @@ export function extractHtml(text: string): string {
   return fenced ? fenced[2] : stripped;
 }
 
+// Return the first top-level JSON array or object span, ignoring surrounding prose,
+// an optional outer Markdown fence, and trailing commentary. The scan is balanced and
+// string/escape-aware so braces inside string values do not end it early.
+export function extractJson(text: string): string | undefined {
+  const source = stripOuterFences(text);
+  const start = source.search(/[[{]/);
+  if (start < 0) return undefined;
+  const open = source[start];
+  const close = open === '[' ? ']' : '}';
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index++) {
+    const char = source[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === open) depth++;
+    else if (char === close && --depth === 0) return source.slice(start, index + 1);
+  }
+  return undefined;
+}
+
+export function isHtmlDocument(text: string): boolean {
+  return /<!doctype\s+html|<html[\s>]/i.test(text);
+}
+
+export function isCompleteHtml(text: string): boolean {
+  return isHtmlDocument(text) && /<\/html\s*>/i.test(text);
+}
+
+// Repair a truncated HTML document so a partial design can still be rendered. Only
+// existing content is kept: nothing is invented before the first document tag.
+export function salvageHtml(text: string): string | undefined {
+  const start = text.search(/<!doctype\s+html|<html[\s>]/i);
+  if (start < 0) return undefined;
+  let document = text.slice(start).replace(/\s+$/, '');
+  // Drop a Markdown fence the model appended after an unterminated document.
+  document = document.replace(/[\r\n]+[ \t]*(?:`{3,}|~{3,})[ \t]*$/, '').replace(/\s+$/, '');
+  if (!document) return undefined;
+  for (const tag of ['style', 'script'] as const) {
+    const opens = (document.match(new RegExp(`<${tag}[\\s>]`, 'gi')) ?? []).length;
+    const closes = (document.match(new RegExp(`</${tag}>`, 'gi')) ?? []).length;
+    for (let count = closes; count < opens; count++) document += `</${tag}>`;
+  }
+  if (!/<\/html\s*>/i.test(document)) {
+    if (!/<\/body\s*>/i.test(document)) document += '</body>';
+    document += '</html>';
+  }
+  return document;
+}
+
 export interface VariationRecord {
   name: string;
   html: string;

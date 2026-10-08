@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createProvider, ProviderError } from '../server/providers.js';
-import type { CompletionRequest, ProviderTraceEntry } from '../server/providers.js';
+import type { CompletionRequest, CompletionSummary, ProviderTraceEntry } from '../server/providers.js';
 import type { SavedConnection } from '../server/connection.js';
 import { LIMITS } from '../shared/types.js';
 
@@ -47,7 +47,7 @@ function anthropicPackets(text = '<html>test</html>', reason = 'end_turn'): stri
 afterEach(() => vi.useRealTimers());
 
 describe('provider requests', () => {
-  it('sends the OpenAI protocol with a free-form model, preserved URL prefix, and no guessed token field', async () => {
+  it('sends the OpenAI protocol with a free-form model, preserved URL prefix, and the default token field', async () => {
     const saved = connection();
     const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(completion()));
     const client = createProvider(saved, { fetch: fetcher });
@@ -61,10 +61,61 @@ describe('provider requests', () => {
     expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${key}`);
     expect(new Headers(init?.headers).get('x-api-key')).toBeNull();
     expect(JSON.parse(init!.body as string)).toEqual({
-      model: 'free-form/vendor:model-2026', stream: false,
+      model: 'free-form/vendor:model-2026', stream: false, max_tokens: 32,
       messages: [{ role: 'system', content: 'System rules' }, { role: 'user', content: 'User input' }],
     });
     expect((init!.signal as AbortSignal).aborted).toBe(true);
+  });
+
+  it('sends an explicit temperature and omits the token field when no cap is known', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(completion()));
+    const client = createProvider(connection(), { fetch: fetcher });
+    await client.complete({ ...request(), temperature: 0.3 });
+    const body = JSON.parse(fetcher.mock.calls[0][1]!.body as string);
+    expect(body.temperature).toBe(0.3);
+    expect(body.max_tokens).toBeUndefined();
+  });
+
+  it('rejects an out-of-range temperature before any paid call', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = createProvider(connection(), { fetch: fetcher });
+    await expect(client.complete({ ...request(), temperature: 3 })).rejects.toMatchObject({ status: 'error' });
+    await expect(client.complete({ ...request(), temperature: Number.NaN })).rejects.toMatchObject({ status: 'error' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('reports a stream summary with finish reason, deltas, and end reason', async () => {
+    const summaries: CompletionSummary[] = [];
+    const fetcher = vi.fn<typeof fetch>(async () => sseResponse(openAi('<html>ok</html>')));
+    await collect(createProvider(connection(), { fetch: fetcher }).stream({ ...request(), summary: (info) => summaries.push(info) }));
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ protocol: 'openai', streaming: true, endReason: 'done', finishReason: 'stop', reasoning: false, deltas: 1 });
+    expect(summaries[0].outputChars).toBe('<html>ok</html>'.length);
+  });
+
+  it('reports a stream summary even when the provider stream fails', async () => {
+    const summaries: CompletionSummary[] = [];
+    const fetcher = vi.fn<typeof fetch>(async () => sseResponse(packet({ choices: [{ index: 0, delta: { content: 'partial' } }] }) + packet({ error: { message: key } })));
+    const client = createProvider(connection(), { fetch: fetcher });
+    await expect(collect(client.stream({ ...request(), summary: (info) => summaries.push(info) }))).rejects.toMatchObject({ status: 'error' });
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ streaming: true, endReason: 'error', reasoning: false, deltas: 1 });
+  });
+
+  it('reports a completion summary with the parsed finish reason', async () => {
+    const summaries: CompletionSummary[] = [];
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(completion('result', 'stop')));
+    await createProvider(connection(), { fetch: fetcher }).complete({ ...request(), summary: (info) => summaries.push(info) });
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ protocol: 'openai', streaming: false, endReason: 'finish_reason', finishReason: 'stop', reasoning: false, deltas: 1 });
+    expect(summaries[0].outputChars).toBe('result'.length);
+  });
+
+  it('never lets a faulty summary sink fail a paid request', async () => {
+    const completeFetcher = vi.fn<typeof fetch>(async () => jsonResponse(completion()));
+    expect(await createProvider(connection(), { fetch: completeFetcher }).complete({ ...request(), summary: () => { throw new Error('sink exploded'); } })).toBe('result');
+    const streamFetcher = vi.fn<typeof fetch>(async () => sseResponse(openAi('result')));
+    expect(await collect(createProvider(connection(), { fetch: streamFetcher }).stream({ ...request(), summary: () => { throw new Error('sink exploded'); } }))).toBe('result');
   });
 
   it('traces the outbound body and raw upstream frames for a streaming request', async () => {

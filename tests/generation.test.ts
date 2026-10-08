@@ -4,6 +4,7 @@ import { registerSecret } from '../shared/diagnostics.js';
 import { ProviderError } from '../server/providers.js';
 import type { CompletionRequest, ProviderClient } from '../server/providers.js';
 import { HTML_SYSTEM, IDEAS_SYSTEM, OUTPUT_MAX_CHARS, OUTPUT_MIN_CHARS, PLAN_SYSTEM, VARIATIONS_SYSTEM } from '../server/prompts.js';
+import type { RunLog } from '../server/runlog.js';
 import { LIMITS } from '../shared/types.js';
 import type { GenerationEvent, GenerationRequest, TraceEntry, VariationsRequest } from '../shared/types.js';
 
@@ -23,6 +24,16 @@ function client() {
 function capture() {
   const events: GenerationEvent[] = [];
   return { events, emit: async (event: GenerationEvent) => { events.push(event); } };
+}
+
+function spyRunLog() {
+  return {
+    meta: vi.fn<RunLog['meta']>(),
+    exchange: vi.fn<RunLog['exchange']>(),
+    failure: vi.fn<RunLog['failure']>(),
+    finish: vi.fn<RunLog['finish']>(),
+    close: vi.fn(async () => undefined),
+  };
 }
 
 function done(events: GenerationEvent[], status: string, operationId: string): void {
@@ -53,7 +64,7 @@ describe('generation orchestration', () => {
       }
     });
     await runGeneration(provider, input, abortSignal, emit);
-    expect(provider.complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ maxTokens: 256, signal: abortSignal, system: PLAN_SYSTEM }));
+    expect(provider.complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ maxTokens: 1024, signal: abortSignal, system: PLAN_SYSTEM }));
     expect(provider.stream).toHaveBeenCalledTimes(3);
     expect(started).toBe(3);
     expect(maxInFlight).toBe(1);
@@ -111,6 +122,16 @@ describe('generation orchestration', () => {
     const { events, emit } = capture();
     await runGeneration(provider, request(), signal(), emit);
     expect(events[0]).toMatchObject({ type: 'plan', names });
+    expect(events.some((event) => event.type === 'warning')).toBe(false);
+    done(events, 'complete', 'operation-1');
+  });
+
+  it('recovers a JSON array embedded in prose instead of falling back', async () => {
+    const provider = client();
+    provider.complete.mockResolvedValue('Sure! Here are three directions: ["Etched Copper","Folded Paper","Wire Grid"] Enjoy.');
+    const { events, emit } = capture();
+    await runGeneration(provider, request(), signal(), emit);
+    expect(events[0]).toMatchObject({ type: 'plan', names: ['Etched Copper', 'Folded Paper', 'Wire Grid'] });
     expect(events.some((event) => event.type === 'warning')).toBe(false);
     done(events, 'complete', 'operation-1');
   });
@@ -173,6 +194,25 @@ describe('generation orchestration', () => {
     expect(events.filter((event) => event.type === 'artifact-error')).toHaveLength(3);
     expect(events.some((event) => event.type === 'artifact-done')).toBe(false);
     done(events, 'error', 'operation-1');
+  });
+
+  it('salvages a truncated document as an incomplete artifact and warns once per artifact', async () => {
+    const provider = client();
+    provider.stream.mockImplementation(async function* () { yield '<!DOCTYPE html><html><head><style>.x{color:red}'; });
+    const logger = spyRunLog();
+    const { events, emit } = capture();
+    await runGeneration(provider, request(), signal(), emit, undefined, logger);
+    const completed = events.filter((event) => event.type === 'artifact-done');
+    expect(completed).toHaveLength(3);
+    for (const event of completed) {
+      expect(event).toMatchObject({ status: 'incomplete' });
+      if (event.type === 'artifact-done') expect(event.html).toContain('</style></body></html>');
+    }
+    expect(events.filter((event) => event.type === 'warning')).toHaveLength(3);
+    expect(logger.failure).toHaveBeenCalledTimes(3);
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'artifact-truncated', severity: 'warning', status: 'incomplete', raw: '<!DOCTYPE html><html><head><style>.x{color:red}' }));
+    expect(events.some((event) => event.type === 'artifact-error')).toBe(false);
+    done(events, 'incomplete', 'operation-1');
   });
 
   it('bounds each artifact and closes its iterator while retaining earlier deltas', async () => {
@@ -386,7 +426,7 @@ describe('explicit ideas', () => {
     provider.complete.mockResolvedValue('```json\n["A tactile gallery", " A kinetic train board "]\n```');
     const { events, emit } = capture();
     await runIdeas(provider, { operationId: 'ideas-op' }, signal(), emit);
-    expect(provider.complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ system: IDEAS_SYSTEM, maxTokens: 1536 }));
+    expect(provider.complete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ system: IDEAS_SYSTEM, maxTokens: 4096 }));
     expect(provider.stream).not.toHaveBeenCalled();
     expect(events[0]).toEqual({ type: 'ideas', operationId: 'ideas-op', ideas: ['A tactile gallery', 'A kinetic train board'] });
     done(events, 'complete', 'ideas-op');
@@ -434,5 +474,96 @@ describe('design prompt invariants', () => {
       expect(prompt).toContain('desktop and mobile');
       expect(prompt).toContain(`${OUTPUT_MIN_CHARS} and ${OUTPUT_MAX_CHARS} characters`);
     }
+  });
+});
+
+describe('run log capture', () => {
+  it('logs the exact plan exchange and a plan-invalid warning while still falling back', async () => {
+    const provider = client();
+    provider.complete.mockResolvedValue('not JSON');
+    const logger = spyRunLog();
+    const { events, emit } = capture();
+    await runGeneration(provider, request(), signal(), emit, undefined, logger);
+    expect(logger.exchange).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'plan', label: 'plan', system: PLAN_SYSTEM, user: 'Interface request:\nA museum guide\n\nRespond with the JSON array only.', output: 'not JSON',
+    }));
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'plan-invalid', severity: 'warning', raw: 'not JSON' }));
+    expect(events[1]).toMatchObject({ type: 'plan', names: ['Layered Paper', 'Etched Metal', 'Kinetic Wireframe'] });
+    done(events, 'complete', 'operation-1');
+  });
+
+  it('logs each artifact exchange with its hoisted prompt and raw stream output', async () => {
+    const provider = client();
+    const logger = spyRunLog();
+    await runGeneration(provider, request(), signal(), async () => undefined, undefined, logger);
+    const exchanges = logger.exchange.mock.calls.map(([info]) => info).filter((info) => info.phase === 'generate');
+    expect(exchanges.map((info) => info.label)).toEqual(names);
+    expect(exchanges.map((info) => info.output)).toEqual(['<html>complete</html>', '<html>complete</html>', '<html>complete</html>']);
+    expect(exchanges[0]).toMatchObject({ artifactId: 'artifact-1', system: HTML_SYSTEM, user: expect.stringContaining(names[0]) });
+    expect(exchanges[0].user).toContain('A museum guide');
+  });
+
+  it('logs an artifact-invalid failure with the raw model output', async () => {
+    const provider = client();
+    provider.stream.mockImplementation(async function* () { yield 'I cannot provide this.'; });
+    const logger = spyRunLog();
+    await runGeneration(provider, request(), signal(), capture().emit, undefined, logger);
+    expect(logger.failure).toHaveBeenCalledTimes(3);
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'artifact-invalid', severity: 'error', raw: 'I cannot provide this.' }));
+  });
+
+  it('logs a variations-count failure with the assembled stream output', async () => {
+    const provider = client();
+    provider.stream.mockImplementation(async function* () { yield variations[0]; });
+    const logger = spyRunLog();
+    await runVariations(provider, variationRequest(), signal(), capture().emit, undefined, logger);
+    expect(logger.exchange).toHaveBeenCalledWith(expect.objectContaining({ phase: 'variations', output: variations[0] }));
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'variations-count', raw: variations[0] }));
+  });
+
+  it('logs a variations-scan failure when the scanner rejects the stream', async () => {
+    const provider = client();
+    provider.stream.mockImplementation(async function* () { yield `${variations[0]}\n{bad}`; });
+    const logger = spyRunLog();
+    await runVariations(provider, variationRequest(), signal(), capture().emit, undefined, logger);
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'variations-scan', raw: `${variations[0]}\n{bad}` }));
+  });
+
+  it('logs the ideas exchange and an ideas-invalid failure', async () => {
+    const provider = client();
+    provider.complete.mockResolvedValue('{}');
+    const logger = spyRunLog();
+    await runIdeas(provider, { operationId: 'ideas-op' }, signal(), capture().emit, undefined, logger);
+    expect(logger.exchange).toHaveBeenCalledWith(expect.objectContaining({ phase: 'ideas', system: IDEAS_SYSTEM, output: '{}' }));
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'ideas-invalid', raw: '{}' }));
+  });
+
+  it('logs the request parameters and the completion summary on plan exchanges and failures', async () => {
+    const provider = client();
+    provider.complete.mockImplementation(async (input: CompletionRequest) => {
+      input.summary?.({ protocol: 'openai', streaming: false, endReason: 'finish_reason', finishReason: 'stop', reasoning: false, deltas: 1, outputChars: 8 });
+      return 'not JSON';
+    });
+    const logger = spyRunLog();
+    await runGeneration(provider, request(), signal(), capture().emit, undefined, logger);
+    expect(logger.exchange).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'plan', maxTokens: 1024, temperature: 0, finishReason: 'stop', reasoning: false, deltas: 1, endReason: 'finish_reason',
+    }));
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'plan-invalid', maxTokens: 1024, temperature: 0, endReason: 'finish_reason' }));
+  });
+
+  it('logs the request parameters and the stream summary for each artifact', async () => {
+    const provider = client();
+    provider.stream.mockImplementation(async function* (input: CompletionRequest) {
+      input.summary?.({ protocol: 'openai', streaming: true, endReason: 'done', finishReason: 'stop', reasoning: true, deltas: 4, outputChars: 22 });
+      yield '<html>complete</html>';
+    });
+    const logger = spyRunLog();
+    await runGeneration(provider, request(), signal(), capture().emit, undefined, logger);
+    const exchanges = logger.exchange.mock.calls.map(([info]) => info).filter((info) => info.phase === 'generate');
+    expect(exchanges).toHaveLength(3);
+    expect(exchanges[0]).toMatchObject({
+      artifactId: 'artifact-1', maxTokens: 16384, temperature: 0.2, finishReason: 'stop', reasoning: true, deltas: 4, endReason: 'done',
+    });
   });
 });
