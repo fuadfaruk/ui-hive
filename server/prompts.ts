@@ -26,7 +26,7 @@ Output only an array of exactly three unique, concise material-based UI style na
 
 export const HTML_SYSTEM = `${designRules}
 ${htmlRules}
-Begin your reply with \`<!DOCTYPE html>\`. Output the document only; no preamble.`;
+Your reply streams live into a rendered HTML preview display: every character you emit reaches that page as it arrives, so any text outside the document would appear on the rendered interface. Write only the document itself and never add greetings, notes, explanations, or commentary. Begin your reply with the opening Markdown fence \`\`\`html on its own line, then the complete \`<!DOCTYPE html>\` document, then a closing \`\`\` fence on its own line. Output only the fenced document; no preamble or trailing commentary.`;
 
 export const VARIATIONS_SYSTEM = `${designRules}
 ${htmlRules}

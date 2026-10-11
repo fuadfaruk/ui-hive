@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readSse, readUtf8, StreamError, extractHtml, extractJson, isCompleteHtml, isHtmlDocument, salvageHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
+import { readSse, readUtf8, StreamError, extractHtml, extractJson, isCompleteHtml, isHtmlDocument, LeadingFenceStripper, salvageHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
 import type { VariationRecord } from '../shared/stream.js';
 
 const encoder = new TextEncoder();
@@ -124,6 +124,55 @@ describe('outer fences', () => {
     expect(stripOuterFences(`  ${html}\n`)).toBe(`  ${html}\n`);
     expect(stripOuterFences(`\`\`\`html\n${html}`)).toBe(`\`\`\`html\n${html}`);
     expect(stripOuterFences(`before\n\`\`\`html\n${html}\n\`\`\``)).toContain('before');
+  });
+});
+
+describe('leading fence stripper', () => {
+  const html = '<!DOCTYPE html>\n<html lang="en"><head></head><body><p>caf\u00e9</p></body></html>';
+  const fenced = '```html\n' + html + '\n```';
+
+  function strip(chunks: string[]): string {
+    const stripper = new LeadingFenceStripper();
+    return chunks.map((chunk) => stripper.push(chunk)).join('') + stripper.finish();
+  }
+
+  it('drops only the leading fence at every split and keeps the closing fence', () => {
+    for (let split = 0; split <= fenced.length; split++) {
+      expect(strip([fenced.slice(0, split), fenced.slice(split)])).toBe(html + '\n```');
+    }
+    expect(strip(Array.from(fenced))).toBe(html + '\n```');
+    expect(extractHtml(strip(Array.from(fenced)))).toBe(html);
+  });
+
+  it('is lossless for output that does not begin with a fence', () => {
+    const document = '<!doctype html><html><body>ok</body></html>';
+    for (const output of [document, 'Here you go:\n' + document, '']) {
+      expect(strip(Array.from(output))).toBe(output);
+    }
+  });
+
+  it('drops blank lines, indentation, and a BOM before the fence', () => {
+    expect(strip(['\ufeff  \n\n```html\n', html, '\n```'])).toBe(html + '\n```');
+  });
+
+  it('handles tilde fences, long fences, and info strings', () => {
+    expect(strip(['~~~~html\r\n' + html])).toBe(html);
+    expect(strip(['````\n' + html])).toBe(html);
+    expect(strip(['```HTML\n' + html])).toBe(html);
+  });
+
+  it('flushes a backtick line that is not a valid opener', () => {
+    for (const output of ['``` a b\n<div>x</div>', '``\n<p>y</p>']) {
+      expect(strip(Array.from(output))).toBe(output);
+    }
+  });
+
+  it('resolves a fence-only or whitespace-only prefix to nothing at the end', () => {
+    for (const prefix of ['```', '```html', '   ']) {
+      const stripper = new LeadingFenceStripper();
+      expect(stripper.push(prefix)).toBe('');
+      expect(stripper.finish()).toBe('');
+    }
   });
 });
 

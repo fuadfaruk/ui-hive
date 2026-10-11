@@ -174,6 +174,67 @@ export function stripOuterFences(text: string): string {
   return match ? match[2] : text;
 }
 
+// A complete opener line: optional leading whitespace/blank lines, a backtick or tilde
+// fence of three or more characters, an optional info string, and a line ending. The
+// leading `\s*` also consumes a UTF-8 BOM, which JavaScript classifies as whitespace.
+const FENCE_OPEN = /^\s*(?:`{3,}|~{3,})[ \t]*[\w-]*[ \t]*(?:\r\n|\n|\r)/;
+// The same opener without its line ending, for a fence that ends the stream.
+const FENCE_OPEN_TAIL = /^\s*(?:`{3,}|~{3,})[ \t]*[\w-]*[ \t]*$/;
+
+// Drop only the leading Markdown fence from a stream of HTML deltas, incrementally.
+// A model that is asked for a fenced document streams "```html\n" first; leaving it in
+// would keep a fence visible in the live preview and in partial/cancelled source,
+// because extractHtml only removes a leading fence once the closing </html> has arrived.
+// The transform is lossless: output that does not begin with a fence passes through
+// byte-for-byte, and a closing fence is deliberately retained for extractHtml.
+export class LeadingFenceStripper {
+  // An opener may be split across deltas, so the small undecided prefix is buffered.
+  // Anything past this cap is assumed to be document content, not a fence.
+  private static readonly maxPending = 128;
+  private pending = '';
+  private settled = false;
+
+  private flush(): string {
+    this.settled = true;
+    const output = this.pending;
+    this.pending = '';
+    return output;
+  }
+
+  push(chunk: string): string {
+    if (this.settled) return chunk;
+    this.pending += chunk;
+    const open = FENCE_OPEN.exec(this.pending);
+    if (open) {
+      this.settled = true;
+      const rest = this.pending.slice(open[0].length);
+      this.pending = '';
+      return rest;
+    }
+    const first = this.pending.search(/\S/);
+    if (first >= 0) {
+      const char = this.pending[first];
+      // First real character is not a fence marker, so this is ordinary content.
+      if (char !== '`' && char !== '~') return this.flush();
+      // A fence marker with a line ending already buffered that did not match an
+      // opener (for example "``\n" or "``` a b\n") is not a fence: emit it unchanged.
+      if (/[\r\n]/.test(this.pending)) return this.flush();
+    }
+    if (this.pending.length > LeadingFenceStripper.maxPending) return this.flush();
+    return '';
+  }
+
+  finish(): string {
+    if (this.settled) return '';
+    this.settled = true;
+    const pending = this.pending;
+    this.pending = '';
+    if (!pending.trim()) return '';
+    if (FENCE_OPEN_TAIL.test(pending)) return '';
+    return pending;
+  }
+}
+
 export function isHtmlSource(text: string): boolean {
   return /<[a-z][\w:-]*(?:\s|\/?>)/i.test(text);
 }

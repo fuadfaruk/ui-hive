@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { log, redact } from '../shared/diagnostics.js';
-import { extractHtml, extractJson, isCompleteHtml, isHtmlSource, salvageHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
+import { extractHtml, extractJson, isCompleteHtml, isHtmlSource, LeadingFenceStripper, salvageHtml, stripOuterFences, VariationScanner, VariationScanError } from '../shared/stream.js';
 import { LIMITS } from '../shared/types.js';
 import type { GenerationEvent, GenerationRequest, IdeasRequest, Trace, TracePhase, VariationsRequest } from '../shared/types.js';
 import { ProviderError } from './providers.js';
@@ -138,39 +138,48 @@ export async function runGeneration(client: ProviderClient, request: GenerationR
     await emit({ type: 'plan', operationId, sessionId, names });
     const runArtifact = async (artifactId: string, index: number): Promise<DoneStatus> => {
       let html = '';
+      let raw = '';
       let deltas = 0;
       let site = 'artifact-error';
       let summary: CompletionSummary | undefined;
+      const stripper = new LeadingFenceStripper();
       // Hoisted so the logged input is byte-identical to the request body.
       const system = HTML_SYSTEM;
       const user = htmlPrompt(prompt, names[index]);
+      // The model is asked for a fenced document, so only the cleaned deltas are
+      // accumulated and streamed; `raw` keeps the literal output for the run log.
+      const accept = async (delta: string): Promise<void> => {
+        if (html.length + delta.length > LIMITS.html) {
+          site = 'artifact-limit';
+          throw new ProviderError('incomplete', 'This design exceeded the safe HTML size limit.');
+        }
+        html += delta;
+        deltas++;
+        const event = { type: 'artifact-delta' as const, operationId, sessionId, artifactId, delta };
+        if (JSON.stringify(event).length > LIMITS.sseEvent) {
+          site = 'artifact-limit';
+          throw new ProviderError('incomplete', 'This design exceeded the safe event size limit.');
+        }
+        await emit(event);
+      };
       try {
         active(signal);
         log.server('debug', 'generation', 'artifact stream start', { operationId, artifactId, index, styleName: names[index] });
-        for await (const delta of client.stream({
+        for await (const chunk of client.stream({
           system, user, signal,
           maxTokens: PARAMS.generate.maxTokens, temperature: PARAMS.generate.temperature,
           trace: tracer(trace, 'generate', names[index], artifactId),
           summary: (info) => { summary = info; },
         })) {
           active(signal);
-          if (html.length + delta.length > LIMITS.html) {
-            site = 'artifact-limit';
-            throw new ProviderError('incomplete', 'This design exceeded the safe HTML size limit.');
-          }
-          html += delta;
-          if (delta) {
-            deltas++;
-            const event = { type: 'artifact-delta' as const, operationId, sessionId, artifactId, delta };
-            if (JSON.stringify(event).length > LIMITS.sseEvent) {
-              site = 'artifact-limit';
-              throw new ProviderError('incomplete', 'This design exceeded the safe event size limit.');
-            }
-            await emit(event);
-          }
+          raw += chunk;
+          const delta = stripper.push(chunk);
+          if (delta) await accept(delta);
         }
+        const tail = stripper.finish();
+        if (tail) await accept(tail);
         active(signal);
-        logger?.exchange({ phase: 'generate', label: names[index], artifactId, system, user, output: html, ...PARAMS.generate, ...observed(summary) });
+        logger?.exchange({ phase: 'generate', label: names[index], artifactId, system, user, output: raw, ...PARAMS.generate, ...observed(summary) });
         const final = extractHtml(html);
         if (!final.trim() || !isHtmlSource(final)) {
           site = 'artifact-invalid';
@@ -181,7 +190,7 @@ export async function runGeneration(client: ProviderClient, request: GenerationR
           // correctly but was cut off is salvaged and rendered as a partial design.
           const repaired = salvageHtml(html) ?? final;
           const message = 'This design was truncated and rendered as a partial document.';
-          logger?.failure({ phase: 'generate', label: names[index], artifactId, site: 'artifact-truncated', severity: 'warning', status: 'incomplete', message, raw: html, ...PARAMS.generate, ...observed(summary) });
+          logger?.failure({ phase: 'generate', label: names[index], artifactId, site: 'artifact-truncated', severity: 'warning', status: 'incomplete', message, raw, ...PARAMS.generate, ...observed(summary) });
           const event = { type: 'artifact-done' as const, operationId, sessionId, artifactId, html: repaired, status: 'incomplete' as const };
           if (JSON.stringify(event).length > LIMITS.sseEvent) {
             site = 'artifact-limit';
@@ -202,7 +211,7 @@ export async function runGeneration(client: ProviderClient, request: GenerationR
         return 'complete';
       } catch (error) {
         const result = failure(error, signal, !!html);
-        logger?.failure({ phase: 'generate', label: names[index], artifactId, site, severity: severity(result.status), status: result.status, message: result.message, raw: html, ...PARAMS.generate, ...observed(summary) });
+        logger?.failure({ phase: 'generate', label: names[index], artifactId, site, severity: severity(result.status), status: result.status, message: result.message, raw, ...PARAMS.generate, ...observed(summary) });
         log.server('warn', 'generation', 'artifact failed', {
           operationId, artifactId, index, deltas, partialHtmlChars: html.length,
           status: result.status, message: result.message, error, signalAborted: signal.aborted,
@@ -306,7 +315,7 @@ export async function runIdeas(client: ProviderClient, request: IdeasRequest, si
     active(signal);
     // Hoisted so the logged input is byte-identical to the request body.
     const system = IDEAS_SYSTEM;
-    const user = `Output an array of three product/component name with unique UI design prompt strings, each at most 240 characters. It does not have to be a practical product or UI, be creative. Example: ["A precision audio workstation with smoked glass panels and electric lime controls.", "A plane cockpit pannel with origami visual", "Bioluminescent task list"]. Your entire reply must start with \`[\` and end with \`]\`. No text before or after.`;
+    const user = `Output an array of three product/component name with unique UI design prompt strings, each at most 240 characters. It does not have to be a practical product or UI, be creative, go crazy fancy. Example: ["A precision audio workstation with smoked glass panels and electric lime controls.", "A plane cockpit pannel with origami visual", "Bioluminescent task list"]. Your entire reply must start with \`[\` and end with \`]\`. No text before or after.`;
     raw = await client.complete({
       system, user, signal,
       maxTokens: PARAMS.ideas.maxTokens, temperature: PARAMS.ideas.temperature,

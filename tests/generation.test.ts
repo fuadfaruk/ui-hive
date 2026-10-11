@@ -70,11 +70,35 @@ describe('generation orchestration', () => {
     expect(maxInFlight).toBe(1);
     expect(provider.stream.mock.calls.map(([completion]) => completion.user)).toEqual(names.map((name) => expect.stringContaining(name)));
     expect(events.filter((event) => event.type === 'artifact-delta')).toHaveLength(6);
+    const firstDeltas = events
+      .filter((event): event is Extract<GenerationEvent, { type: 'artifact-delta' }> => event.type === 'artifact-delta' && event.artifactId === 'artifact-1')
+      .map((event) => event.delta);
+    expect(firstDeltas).toEqual(['<html><script>const code = "```";</script>', '</html>\n```']);
     expect(events.filter((event) => event.type === 'artifact-done')).toEqual(input.artifactIds.map((artifactId) => ({
       type: 'artifact-done', operationId: input.operationId, sessionId: input.sessionId, artifactId,
       html: '<html><script>const code = "```";</script></html>',
     })));
     done(events, 'complete', input.operationId);
+  });
+
+  it('strips the requested leading fence from deltas while logging the raw fenced output', async () => {
+    const provider = client();
+    const fenced = '```html\n<html>complete</html>\n```';
+    provider.stream.mockImplementation(async function* () { yield fenced.slice(0, 12); yield fenced.slice(12); });
+    const logger = spyRunLog();
+    const { events, emit } = capture();
+    await runGeneration(provider, request(), signal(), emit, undefined, logger);
+    const first = events
+      .filter((event): event is Extract<GenerationEvent, { type: 'artifact-delta' }> => event.type === 'artifact-delta' && event.artifactId === 'artifact-1')
+      .map((event) => event.delta);
+    expect(first.join('')).toBe('<html>complete</html>\n```');
+    expect(first.every((delta) => !delta.includes('```html'))).toBe(true);
+    const exchanges = logger.exchange.mock.calls.map(([info]) => info).filter((info) => info.phase === 'generate');
+    expect(exchanges.every((info) => info.output === fenced)).toBe(true);
+    for (const event of events) {
+      if (event.type === 'artifact-done') expect(event.html).toBe('<html>complete</html>');
+    }
+    done(events, 'complete', 'operation-1');
   });
 
   it('redacts credentials, labels, and clips traced provider text for the inspector', async () => {
@@ -476,6 +500,8 @@ describe('design prompt invariants', () => {
       expect(prompt).toContain('contrast');
       expect(prompt).toContain(`${OUTPUT_MIN_CHARS} and ${OUTPUT_MAX_CHARS} characters`);
     }
+    expect(HTML_SYSTEM).toContain('```html');
+    expect(HTML_SYSTEM).toContain('streams live into a rendered HTML preview display');
   });
 });
 
