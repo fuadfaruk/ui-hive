@@ -399,7 +399,7 @@
   .trace-hint, .trace-empty { padding: 14px; font-size: 11px; line-height: 1.7; color: var(--quiet); }
   .trace-hint { border-bottom: 1px solid var(--line); color: var(--warning); }
   .trace-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 11px; }
-  .trace-entry { border: 1px solid var(--line); border-left-width: 2px; border-radius: 8px; background: var(--surface-2); overflow: hidden; }
+  .trace-entry { flex: none; border: 1px solid var(--line); border-left-width: 2px; border-radius: 8px; background: var(--surface-2); overflow: hidden; }
   .trace-entry-in { border-left-color: var(--accent); }
   .trace-entry-out { border-left-color: #5b7a96; }
   .trace-entry-head { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-bottom: 1px solid var(--line); font: 9px var(--mono); letter-spacing: .5px; color: var(--quiet); }

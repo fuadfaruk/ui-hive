@@ -306,7 +306,7 @@ export async function runIdeas(client: ProviderClient, request: IdeasRequest, si
     active(signal);
     // Hoisted so the logged input is byte-identical to the request body.
     const system = IDEAS_SYSTEM;
-    const user = 'Return fresh, varied interface ideas.';
+    const user = `Output an array of three product/component name with unique UI design prompt strings, each at most 240 characters. It does not have to be a practical product or UI, be creative. Example: ["A precision audio workstation with smoked glass panels and electric lime controls.", "A plane cockpit pannel with origami visual", "Bioluminescent task list"]. Your entire reply must start with \`[\` and end with \`]\`. No text before or after.`;
     raw = await client.complete({
       system, user, signal,
       maxTokens: PARAMS.ideas.maxTokens, temperature: PARAMS.ideas.temperature,

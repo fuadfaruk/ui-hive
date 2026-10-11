@@ -462,16 +462,18 @@ describe('design prompt invariants', () => {
   it('preserves material-first, typography, IP safety, bold layouts, and reduced motion', () => {
     for (const prompt of [PLAN_SYSTEM, HTML_SYSTEM, VARIATIONS_SYSTEM, IDEAS_SYSTEM]) {
       expect(prompt).toContain('material-first');
-      expect(prompt).toContain('typography');
       expect(prompt).toContain('brand');
-      expect(prompt).toContain('bold');
       expect(prompt).toContain('prefers-reduced-motion');
     }
     for (const prompt of [HTML_SYSTEM, VARIATIONS_SYSTEM]) {
+      expect(prompt).toContain('typography');
+      expect(prompt).toContain('bold');
       expect(prompt).toContain('self-contained HTML');
       expect(prompt).toContain('No remote fonts');
       expect(prompt).toContain('dependencies');
       expect(prompt).toContain('desktop and mobile');
+      expect(prompt).toContain('centered');
+      expect(prompt).toContain('contrast');
       expect(prompt).toContain(`${OUTPUT_MIN_CHARS} and ${OUTPUT_MAX_CHARS} characters`);
     }
   });
