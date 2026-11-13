@@ -233,7 +233,7 @@
   .status-queued { color: var(--muted); }
   .status-error { color: var(--danger); border-color: rgba(180, 82, 60, .3); }
   .status-incomplete, .status-cancelled { color: var(--warning); border-color: rgba(169, 116, 26, .3); }
-  .artifact-preview-wrap { position: relative; aspect-ratio: 1.2; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .artifact-preview-wrap { position: relative; width: 100%; aspect-ratio: 1.2; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   .preview-surface { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--surface-2); isolation: isolate; }
   .preview-frame { position: absolute; display: block; top: 0; left: 0; width: 100%; height: 100%; border: 0; background: #fff; transform-origin: 0 0; pointer-events: none; }
   .preview-interactive { pointer-events: auto; }

@@ -26,7 +26,7 @@ Output only an array of exactly three unique, concise material-based UI style na
 
 export const HTML_SYSTEM = `${designRules}
 ${htmlRules}
-Your reply streams live into a rendered HTML preview display: every character you emit reaches that page as it arrives, so any text outside the document would appear on the rendered interface. Write only the document itself and never add greetings, notes, explanations, or commentary. Begin your reply with the opening Markdown fence \`\`\`html on its own line, then the complete \`<!DOCTYPE html>\` document, then a closing \`\`\` fence on its own line. Output only the fenced document; no preamble or trailing commentary.`;
+Your reply streams live into a rendered HTML preview display: every character you emit reaches that page as it arrives, so any text outside the document would appear on the rendered interface. Write the document itself and never add greetings, notes, explanations, or commentary. Begin your reply with the opening Markdown fence \`\`\`html on its own line, then the complete \`<!DOCTYPE html>\` document, then a closing \`\`\` fence on its own line. Output only the fenced document; no preamble or trailing commentary.`;
 
 export const VARIATIONS_SYSTEM = `${designRules}
 ${htmlRules}
@@ -40,7 +40,7 @@ export function planPrompt(prompt: string): string {
 }
 
 export function htmlPrompt(prompt: string, styleName: string): string {
-  return `Interface request:\n${prompt}\n\nVisual direction:\n${styleName}\n\nRespond with the HTML document only.`;
+  return `Interface request:\n${prompt}\n\nVisual direction:\n${styleName}\n\n This is an one-time, one-way application system. Do not ask follow up questions. Make suitable assumptions that you see fit. Respond with the HTML document only.`;
 }
 
 export function variationsPrompt(prompt: string, html: string): string {

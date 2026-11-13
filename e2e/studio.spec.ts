@@ -85,6 +85,46 @@ test('first run, explicit connection test, safe key retention, and forgetting', 
   expect(stats.plans + stats.html + stats.ideas + stats.variations).toBe(0);
 });
 
+test('loading and generated previews fill each card across responsive sizes', async ({ page }, info) => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/generate', async (route) => {
+    await pending;
+    await route.continue();
+  });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const viewports = info.project.name === 'desktop' ? [
+    { width: 1920, height: 960 }, { width: 1440, height: 800 },
+    { width: 1920, height: 1050 }, { width: 1920, height: 1200 }, { width: 1100, height: 800 },
+  ] : [{ width: 390, height: 844 }, { width: 820, height: 960 }];
+  try {
+    await page.goto('/');
+    await generate(page);
+    await expect(page.locator('.artifact-queued .preview-empty')).toHaveCount(3);
+    for (const state of ['queued', 'complete']) {
+      if (state === 'complete') { release(); await ready(page); }
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport);
+        await expect.poll(() => page.locator('.artifact-card').evaluateAll((cards) => Math.max(
+          ...cards.flatMap((card) => {
+            const bounds = card.getBoundingClientRect();
+            const style = getComputedStyle(card);
+            const surface = card.querySelector('.preview-surface')!.getBoundingClientRect();
+            return [
+              Math.abs(surface.left - bounds.left - parseFloat(style.borderLeftWidth)),
+              Math.abs(surface.right - bounds.right + parseFloat(style.borderRightWidth)),
+              ...Array.from(card.querySelectorAll('.preview-empty, .preview-focus-button, iframe')).flatMap((element) => {
+                const preview = element.getBoundingClientRect();
+                return (['left', 'right', 'top', 'bottom'] as const).map((edge) => Math.abs(preview[edge] - surface[edge]));
+              }),
+            ];
+          }),
+        )), { message: `${state} previews should fill their cards at ${viewport.width}x${viewport.height}` }).toBeLessThan(1);
+      }
+    }
+  } finally { release(); }
+});
+
 test('three streamed designs, isolated interactive focus, source, variations, deck navigation and reload', async ({ page, request, context }, info) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
   await page.goto('/');
