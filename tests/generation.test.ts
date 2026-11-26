@@ -575,9 +575,9 @@ describe('run log capture', () => {
     const logger = spyRunLog();
     await runGeneration(provider, request(), signal(), capture().emit, undefined, logger);
     expect(logger.exchange).toHaveBeenCalledWith(expect.objectContaining({
-      phase: 'plan', maxTokens: 1024, temperature: 0, finishReason: 'stop', reasoning: false, deltas: 1, endReason: 'finish_reason',
+      phase: 'plan', maxTokens: 1024, temperature: 0.4, finishReason: 'stop', reasoning: false, deltas: 1, endReason: 'finish_reason',
     }));
-    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'plan-invalid', maxTokens: 1024, temperature: 0, endReason: 'finish_reason' }));
+    expect(logger.failure).toHaveBeenCalledWith(expect.objectContaining({ site: 'plan-invalid', maxTokens: 1024, temperature: 0.4, endReason: 'finish_reason' }));
   });
 
   it('logs the request parameters and the stream summary for each artifact', async () => {
@@ -591,7 +591,7 @@ describe('run log capture', () => {
     const exchanges = logger.exchange.mock.calls.map(([info]) => info).filter((info) => info.phase === 'generate');
     expect(exchanges).toHaveLength(3);
     expect(exchanges[0]).toMatchObject({
-      artifactId: 'artifact-1', maxTokens: 16384, temperature: 0.2, finishReason: 'stop', reasoning: true, deltas: 4, endReason: 'done',
+      artifactId: 'artifact-1', maxTokens: 16384, temperature: 0.4, finishReason: 'stop', reasoning: true, deltas: 4, endReason: 'done',
     });
   });
 });

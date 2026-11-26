@@ -38,15 +38,15 @@ describe('run log file sink', () => {
       sessionId: 'session-1', artifactIds: ['a', 'b', 'c'], prompt: 'Build a timer', promptChars: 13,
       startedAt: '2026-01-01T00:00:00.000Z',
     });
-    logger.exchange({ phase: 'generate', label: 'Paper', artifactId: 'a', system: 'system rules', user: 'user input', output: '<html>ok</html>', finishReason: 'stop', reasoning: true, deltas: 7, endReason: 'done', maxTokens: 16384, temperature: 0.2 });
-    logger.failure({ phase: 'generate', label: 'Paper', artifactId: 'a', site: 'artifact-invalid', severity: 'error', status: 'error', message: 'bad html', raw: 'nope', finishReason: 'length', reasoning: false, deltas: 2, endReason: 'finish_reason', maxTokens: 1024, temperature: 0 });
+    logger.exchange({ phase: 'generate', label: 'Paper', artifactId: 'a', system: 'system rules', user: 'user input', output: '<html>ok</html>', finishReason: 'stop', reasoning: true, deltas: 7, endReason: 'done', maxTokens: 16384, temperature: 0.4 });
+    logger.failure({ phase: 'generate', label: 'Paper', artifactId: 'a', site: 'artifact-invalid', severity: 'error', status: 'error', message: 'bad html', raw: 'nope', finishReason: 'length', reasoning: false, deltas: 2, endReason: 'finish_reason', maxTokens: 1024, temperature: 0.4 });
     logger.finish({ status: 'incomplete', elapsedMs: 1234 });
     await logger.close();
     const lines = await records(directory);
     expect(lines.map((line) => line.type)).toEqual(['meta', 'exchange', 'failure', 'finish']);
     expect(lines[0]).toMatchObject({ operationId: 'op-1', kind: 'generate', protocol: 'openai', artifactIds: ['a', 'b', 'c'], promptChars: 13 });
-    expect(lines[1]).toMatchObject({ phase: 'generate', label: 'Paper', artifactId: 'a', system: 'system rules', user: 'user input', output: '<html>ok</html>', outputChars: 15, finishReason: 'stop', reasoning: true, deltas: 7, endReason: 'done', maxTokens: 16384, temperature: 0.2 });
-    expect(lines[2]).toMatchObject({ site: 'artifact-invalid', severity: 'error', status: 'error', message: 'bad html', raw: 'nope', rawChars: 4, finishReason: 'length', reasoning: false, deltas: 2, endReason: 'finish_reason', maxTokens: 1024, temperature: 0 });
+    expect(lines[1]).toMatchObject({ phase: 'generate', label: 'Paper', artifactId: 'a', system: 'system rules', user: 'user input', output: '<html>ok</html>', outputChars: 15, finishReason: 'stop', reasoning: true, deltas: 7, endReason: 'done', maxTokens: 16384, temperature: 0.4 });
+    expect(lines[2]).toMatchObject({ site: 'artifact-invalid', severity: 'error', status: 'error', message: 'bad html', raw: 'nope', rawChars: 4, finishReason: 'length', reasoning: false, deltas: 2, endReason: 'finish_reason', maxTokens: 1024, temperature: 0.4 });
     expect(lines[3]).toMatchObject({ status: 'incomplete', elapsedMs: 1234 });
     for (const line of lines) expect(typeof line.ts).toBe('string');
   });
@@ -57,7 +57,7 @@ describe('run log file sink', () => {
     const directory = await tempDir();
     const logger = createRunLog({ operationId: 'op-2', kind: 'variations', directory });
     logger.exchange({ phase: 'variations', label: `label ${secret}`, system: `system ${secret}`, user: `user ${secret}`, output: `output ${secret}` });
-    logger.failure({ phase: 'variations', label: 'variations', site: 'variations-count', severity: 'warning', status: 'incomplete', message: `message ${secret}`, raw: `raw ${secret}`, finishReason: `stop ${secret}`, endReason: `done ${secret}`, maxTokens: 16384, temperature: 0.2 });
+    logger.failure({ phase: 'variations', label: 'variations', site: 'variations-count', severity: 'warning', status: 'incomplete', message: `message ${secret}`, raw: `raw ${secret}`, finishReason: `stop ${secret}`, endReason: `done ${secret}`, maxTokens: 16384, temperature: 0.4 });
     await logger.close();
     const content = await readFile(await only(directory), 'utf8');
     expect(content).not.toContain(secret);

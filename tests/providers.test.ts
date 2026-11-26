@@ -70,9 +70,9 @@ describe('provider requests', () => {
   it('sends an explicit temperature and omits the token field when no cap is known', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => jsonResponse(completion()));
     const client = createProvider(connection(), { fetch: fetcher });
-    await client.complete({ ...request(), temperature: 0.3 });
+    await client.complete({ ...request(), temperature: 0.4 });
     const body = JSON.parse(fetcher.mock.calls[0][1]!.body as string);
-    expect(body.temperature).toBe(0.3);
+    expect(body.temperature).toBe(0.4);
     expect(body.max_tokens).toBeUndefined();
   });
 

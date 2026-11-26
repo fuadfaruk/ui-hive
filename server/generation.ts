@@ -21,10 +21,10 @@ const fallbackNames: [string, string, string] = ['Layered Paper', 'Etched Metal'
 // schema and settings UI stay unchanged. The Anthropic protocol still clamps
 // maxTokens to the connection's anthropicMaxTokens.
 const PARAMS = {
-  plan: { maxTokens: 1024, temperature: 0 },
-  generate: { maxTokens: 16384, temperature: 0.2 },
-  variations: { maxTokens: 16384, temperature: 0.2 },
-  ideas: { maxTokens: 4096, temperature: 0 },
+  plan: { maxTokens: 1024, temperature: 0.4 },
+  generate: { maxTokens: 16384, temperature: 0.4 },
+  variations: { maxTokens: 16384, temperature: 0.4 },
+  ideas: { maxTokens: 4096, temperature: 0.4 },
 } as const;
 
 // Turn the last provider summary into run-log fields. Empty when the client never
